@@ -12,7 +12,7 @@ This section outlines the simplified implementation strategy to complete the cor
 
 ## Implementation Plan
 
-### Day 1: AI Mock & Preview  ✓
+### Day 1: AI Mock & Preview ✓
 
 #### Morning: Simple AI Service
 
@@ -52,7 +52,7 @@ app.get("/preview", (req, res) => {
 });
 ```
 
-### Day 2: Override & Export  
+### Day 2: Override & Export ✓
 
 #### Morning: Basic Override
 
@@ -68,50 +68,173 @@ app.post("/override", (req, res) => {
 #### Afternoon: PDF Export
 
 ```javascript
-const puppeteer = require('puppeteer');
+const puppeteer = require("puppeteer");
 
-app.get('/export', async (req, res) => {
+app.get("/export", async (req, res) => {
   const browser = await puppeteer.launch();
   const page = await browser.newPage();
   await page.setContent(previewTemplate(req.query.content));
-  const pdf = await page.pdf({ format: 'A4' });
+  const pdf = await page.pdf({ format: "A4" });
   await browser.close();
-  res.type('application/pdf').send(pdf);
+  res.setHeader("Content-Type", "application/pdf");
+  res.end(pdf); // Use res.end() for binary data
 });
 ```
 
 ### Day 3: Frontend Integration
 
-#### Morning: Component Updates
+#### Morning: API Layer Implementation
+
+1. **Create API Utilities Structure**:
 
 ```javascript
-// Simple preview component
-const Preview = {
-  async load(content) {
-    const response = await fetch('/preview?content=' +
-      encodeURIComponent(JSON.stringify(content)));
-    return response.text();
-  }
+// client/src/lib/api.js
+const DEFAULT_CONFIG = {
+  maxRetries: 3,
+  initialBackoffMs: 1000,
+  maxBackoffMs: 10000,
+  retryableStatuses: [401, 408, 429, 500, 502, 503, 504],
 };
 
-// Basic override component
-const Editor = {
-  async save(content, changes) {
-    const response = await fetch('/override', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content, changes })
-    });
-    return response.json();
+class APILogger {
+  static log(endpoint, status, attempt, error = null) {
+    console.log(
+      `[${new Date().toISOString()}] ${endpoint} - Status: ${status}, Attempt: ${attempt}${
+        error ? `, Error: ${error.message}` : ""
+      }`
+    );
+    // Can be enhanced for Day 4 testing with more structured logging
   }
+}
+
+export const api = {
+  async fetchWithRetry(endpoint, options = {}, config = DEFAULT_CONFIG) {
+    let attempt = 1;
+    while (attempt <= config.maxRetries) {
+      try {
+        const response = await fetch(endpoint, options);
+        APILogger.log(endpoint, response.status, attempt);
+
+        if (
+          !response.ok &&
+          config.retryableStatuses.includes(response.status)
+        ) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response;
+      } catch (error) {
+        APILogger.log(endpoint, "ERROR", attempt, error);
+        if (attempt === config.maxRetries) throw error;
+
+        const backoff = Math.min(
+          config.initialBackoffMs * Math.pow(2, attempt - 1),
+          config.maxBackoffMs
+        );
+        await new Promise((r) => setTimeout(r, backoff));
+        attempt++;
+      }
+    }
+  },
 };
 ```
 
-#### Afternoon: Flow Integration
+2. **Endpoint Wrappers**:
 
-- Connect all endpoints
-- Test full workflow
-- Add basic error handling
+```javascript
+// client/src/lib/endpoints.js
+import { api } from "./api";
+
+export const endpoints = {
+  async preview(content) {
+    const response = await api.fetchWithRetry(
+      `/preview?content=${encodeURIComponent(JSON.stringify(content))}`
+    );
+    return response.text();
+  },
+
+  async override(content, changes) {
+    const response = await api.fetchWithRetry("/override", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content, changes }),
+    });
+    return response.json();
+  },
+
+  async export(content) {
+    const response = await api.fetchWithRetry(
+      `/export?content=${encodeURIComponent(JSON.stringify(content))}`,
+      { responseType: "blob" }
+    );
+    return response.blob();
+  },
+};
+```
+
+#### Afternoon: Component Integration
+
+1. **Core Components**:
+
+```javascript
+// Preview.svelte
+<script>
+  import { endpoints } from '../lib/endpoints';
+  import { onMount } from 'svelte';
+
+  export let content;
+  let previewHtml = '';
+  let loading = false;
+  let error = null;
+
+  async function loadPreview() {
+    try {
+      loading = true;
+      previewHtml = await endpoints.preview(content);
+    } catch (e) {
+      error = e.message;
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(loadPreview);
+</script>
+
+{#if loading}
+  <div class="loading">Loading preview...</div>
+{:else if error}
+  <div class="error">{error}</div>
+{:else}
+  {@html previewHtml}
+{/if}
+```
+
+2. **Implementation Checklist**:
+
+- [x] API Layer
+
+  - [ ] Create `api.js` with retry logic
+  - [ ] Implement `APILogger` for status tracking
+  - [ ] Set up endpoint wrappers
+
+- [x] Components
+
+  - [ ] Preview component with error boundaries
+  - [ ] Editor component with validation
+  - [ ] Export component with progress tracking
+
+- [x] Integration
+  - [ ] Connect components through store/state management
+  - [ ] Implement loading states
+  - [ ] Add error recovery UX
+  - [ ] Test cross-component communication
+
+3. **Testing Focus Points**:
+   - API retry mechanism
+   - Error boundary effectiveness
+   - State consistency across components
+   - Loading state transitions
+   - Logger output for Day 4 analysis
 
 ### Day 4: Polish & Test
 

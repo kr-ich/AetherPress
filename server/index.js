@@ -94,34 +94,60 @@ const aiService = new MockAIService();
 
 app.post("/prompt", async (req, res, next) => {
   const { prompt } = req.body;
-  // Input validation
+
+  // Input validation with structured error
   if (typeof prompt !== "string" || !prompt.trim()) {
-    return res
-      .status(400)
-      .json({ error: "Prompt is required and must be a non-empty string." });
+    return sendValidationError(
+      res,
+      "Prompt is required and must be a non-empty string",
+      {
+        provided: typeof prompt,
+        required: "non-empty string",
+      }
+    );
   }
+
   try {
     // Use AI service abstraction with new content format
     const aiResponse = await aiService.generateContent(prompt);
+
     crud.createPrompt(prompt, (err, dbResult) => {
-      if (err) return next(err);
+      if (err) {
+        err.status = 500;
+        err.message = "Failed to store prompt in database";
+        return next(err);
+      }
+
       // Store both prompt and generated content
       crud.createAIResult(dbResult.id, aiResponse.content, (err, aiResult) => {
-        if (err) return next(err);
+        if (err) {
+          err.status = 500;
+          err.message = "Failed to store AI result in database";
+          return next(err);
+        }
+
         res.status(201).json({
-          ...aiResponse,
-          promptId: dbResult.id,
-          resultId: aiResult.id,
+          success: true,
+          data: {
+            ...aiResponse,
+            promptId: dbResult.id,
+            resultId: aiResult.id,
+          },
         });
       });
     });
   } catch (err) {
-    // AI service error handling
+    // Enhanced AI service error handling
+    err.status = err.status || 500;
+    err.message = `AI Service Error: ${err.message}`;
     next(err);
   }
 });
 
 // --- PREVIEW ENDPOINT ---
+// Import error handling utilities
+const { sendValidationError } = require("./utils/errorHandler");
+
 const previewTemplate = (content) => `
 <!DOCTYPE html>
 <html>
@@ -143,22 +169,25 @@ const previewTemplate = (content) => `
 
 app.get("/preview", (req, res) => {
   const { content } = req.query;
+
+  // Validate required parameter
   if (!content) {
-    return res.status(400).json({ error: "Content parameter is required" });
+    return sendValidationError(res, "Content parameter is required");
   }
+
   try {
     const contentObj = JSON.parse(content);
+
+    // Validate content structure
     if (!contentObj.title || !contentObj.body) {
-      return res.status(400).json({
-        error: "Content must include title and body",
+      return sendValidationError(res, "Content must include title and body", {
+        provided: Object.keys(contentObj),
       });
     }
+
     res.send(previewTemplate(contentObj));
   } catch (err) {
-    res.status(400).json({
-      error: "Invalid content format",
-      details: err.message,
-    });
+    sendValidationError(res, "Invalid content format", { error: err.message });
   }
 });
 
@@ -166,29 +195,70 @@ app.get("/preview", (req, res) => {
 app.post("/override", (req, res) => {
   const { content, changes } = req.body;
 
-  // Basic input validation
-  if (!content || !changes || typeof content !== "object") {
-    return res.status(400).json({ error: "Invalid input format" });
+  // Enhanced input validation
+  if (!content) {
+    return sendValidationError(res, "Content is required", {
+      provided: typeof content,
+      required: "object",
+    });
+  }
+
+  if (!changes) {
+    return sendValidationError(res, "Changes are required", {
+      provided: typeof changes,
+      required: "object",
+    });
+  }
+
+  if (typeof content !== "object" || content === null) {
+    return sendValidationError(res, "Content must be an object", {
+      provided: content === null ? "null" : typeof content,
+      required: "object",
+    });
   }
 
   try {
     const updated = { ...content, ...changes };
-    res.json({ content: updated });
+    res.status(200).json({
+      success: true,
+      data: {
+        content: updated,
+      },
+    });
   } catch (err) {
-    res.status(400).json({
-      error: "Failed to update content",
-      details: err.message,
+    sendValidationError(res, "Failed to update content", {
+      error: err.message,
     });
   }
 });
 
 // --- PDF EXPORT ENDPOINT ---
 app.post("/export", async (req, res, next) => {
-  // Log and persist the received request body
-  console.log("--- /export request body ---");
-  console.log(req.body);
   const fs = require("fs");
   const path = require("path");
+
+  // Input validation
+  const { title, body } = req.body;
+  if (!title || !body) {
+    return sendValidationError(res, "Content must include title and body", {
+      provided: Object.keys(req.body),
+      required: ["title", "body"],
+    });
+  }
+
+  // Service availability check
+  if (!puppeteerReady || !browserInstance) {
+    const err = new Error("PDF generation service not ready");
+    err.status = 503;
+    err.code = "SERVICE_UNAVAILABLE";
+    err.details = {
+      puppeteer: puppeteerReady ? "ready" : "initializing",
+      browser: browserInstance ? "available" : "not available",
+    };
+    return next(err);
+  }
+
+  // Log request for debugging (optional)
   try {
     const reqBodyPath = path.resolve(
       __dirname,
@@ -196,35 +266,27 @@ app.post("/export", async (req, res, next) => {
     );
     fs.writeFileSync(reqBodyPath, JSON.stringify(req.body, null, 2));
   } catch (e) {
-    console.error("Failed to write export_request_body.json:", e);
+    console.warn("Failed to write debug log:", e.message);
   }
 
-  const { title, body } = req.body;
-  if (!title || !body) {
-    return res
-      .status(400)
-      .json({ error: "Content must include title and body" });
-  }
-
-  if (!puppeteerReady || !browserInstance) {
-    return res.status(503).json({
-      error: "PDF generation service not ready",
-      details: "Puppeteer is still initializing or failed to launch",
-    });
-  }
-
-  console.log("--- Starting PDF generation ---");
   let page;
   try {
+    // PDF Generation process
     page = await browserInstance.newPage();
-    console.log("Created new Puppeteer page");
+    if (!page) {
+      throw new Error("Failed to create new browser page");
+    }
 
     const contentObj = { title, body };
     await page.setContent(previewTemplate(contentObj));
-    console.log("Set page content successfully");
 
-    console.log("Starting PDF generation with Puppeteer...");
+    // Generate PDF with both buffer and file output
+    const timestamp = Date.now();
+    const filename = `output-${timestamp}.pdf`;
+    const outputPath = path.resolve(__dirname, `../samples/${filename}`);
+
     const pdf = await page.pdf({
+      path: outputPath, // Save to file
       format: "A4",
       printBackground: true,
       margin: {
@@ -234,9 +296,16 @@ app.post("/export", async (req, res, next) => {
         left: "1cm",
       },
     });
-    // Log and persist the first 16 bytes of the PDF buffer
-    console.log("--- /export PDF buffer (first 16 bytes) ---");
-    console.log(pdf.slice(0, 16));
+
+    // Verify file was created
+    if (!fs.existsSync(outputPath)) {
+      throw new Error("PDF file was not created successfully");
+    }
+
+    // Read the generated file
+    const pdfBuffer = fs.readFileSync(outputPath);
+
+    // Optional debug logging
     try {
       const pdfFirst16Path = path.resolve(
         __dirname,
@@ -244,30 +313,41 @@ app.post("/export", async (req, res, next) => {
       );
       fs.writeFileSync(pdfFirst16Path, pdf.slice(0, 16));
     } catch (e) {
-      console.error("Failed to write export_pdf_first16.bin:", e);
+      console.warn("Failed to write debug sample:", e.message);
     }
-    console.log("\n--- Preparing response ---");
-    res.setHeader("Content-Disposition", "inline; filename=output.pdf");
+
+    // Set response headers
+    res.setHeader("Content-Disposition", `inline; filename=${filename}`);
     res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Length", pdfBuffer.length);
 
-    console.log("Response headers set:", {
-      "Content-Type": res.getHeader("Content-Type"),
-      "Content-Disposition": res.getHeader("Content-Disposition"),
-    });
+    // Send PDF response
+    res.end(pdfBuffer);
 
-    console.log(`PDF Buffer details:
-    - Total size: ${pdf.length} bytes
-    - First 5 bytes: ${pdf.slice(0, 5).toString()}
-    - Is Buffer?: ${Buffer.isBuffer(pdf)}
-    `);
-
-    console.log("Sending PDF response...");
-    // Use res.end() instead of res.send() to avoid Express's automatic handling
-    res.end(pdf);
-    console.log("PDF response sent successfully");
+    // Clean up: Remove the temporary file
+    try {
+      fs.unlinkSync(outputPath);
+    } catch (cleanupError) {
+      console.warn(
+        "Failed to clean up temporary PDF file:",
+        cleanupError.message
+      );
+    }
   } catch (err) {
-    err.message = `Failed to generate PDF: ${err.message}`;
-    next(err);
+    const exportError = new Error(`PDF Generation Failed: ${err.message}`);
+    exportError.status = 500;
+    exportError.code = "PDF_GENERATION_ERROR";
+    exportError.details = {
+      step: err.message.includes("browser page")
+        ? "page_creation"
+        : err.message.includes("setContent")
+        ? "content_rendering"
+        : err.message.includes("generation failed")
+        ? "pdf_creation"
+        : "unknown",
+      originalError: err.message,
+    };
+    next(exportError);
   } finally {
     if (page) await page.close();
   }
@@ -276,172 +356,1184 @@ app.post("/export", async (req, res, next) => {
 // --- PROMPTS CRUD API ---
 app.post("/api/prompts", (req, res, next) => {
   const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "Prompt is required" });
+
+  // Input validation with structured error
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return sendValidationError(
+      res,
+      "Prompt is required and must be a non-empty string",
+      {
+        provided: typeof prompt,
+        required: "non-empty string",
+        received: prompt,
+      }
+    );
+  }
+
   crud.createPrompt(prompt, (err, result) => {
-    if (err) return next(err);
-    res.status(201).json(result);
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate prompt not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to create prompt";
+      }
+      return next(err);
+    }
+
+    // Return standardized success response
+    res.status(201).json({
+      success: true,
+      data: result,
+    });
   });
 });
 
 app.get("/api/prompts", (req, res, next) => {
+  // Parse pagination parameters
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+
+  // Validate pagination parameters
+  if (page < 1 || limit < 1) {
+    return sendValidationError(res, "Invalid pagination parameters", {
+      provided: { page, limit },
+      required: "positive integers",
+      details: "Page and limit must be greater than 0",
+    });
+  }
+
+  // Calculate offset
+  const offset = (page - 1) * limit;
+
   crud.getPrompts((err, rows) => {
-    if (err) return next(err);
-    res.json(rows);
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve prompts";
+      return next(err);
+    }
+
+    // Handle empty results
+    if (!rows || rows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      });
+    }
+
+    // Calculate total pages
+    const total = rows.length;
+    const pages = Math.ceil(total / limit);
+
+    // Paginate results
+    const paginatedRows = rows.slice(offset, offset + limit);
+
+    // Return standardized success response with pagination
+    res.status(200).json({
+      success: true,
+      data: paginatedRows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages,
+      },
+    });
   });
 });
 
 app.get("/api/prompts/:id", (req, res, next) => {
-  crud.getPromptById(req.params.id, (err, row) => {
-    if (err) return next(err);
-    if (!row) return res.status(404).json({ error: "Not found" });
-    res.json(row);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid prompt ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Prompt ID must be a positive integer",
+    });
+  }
+
+  crud.getPromptById(id, (err, row) => {
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve prompt";
+      return next(err);
+    }
+
+    // Handle not found
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Prompt not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: row,
+    });
   });
 });
 
 app.put("/api/prompts/:id", (req, res, next) => {
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid prompt ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Prompt ID must be a positive integer",
+    });
+  }
+
+  // Validate prompt in request body
   const { prompt } = req.body;
-  if (!prompt) return res.status(400).json({ error: "Prompt is required" });
-  crud.updatePrompt(req.params.id, prompt, (err, result) => {
-    if (err) return next(err);
-    res.json(result);
+  if (typeof prompt !== "string" || !prompt.trim()) {
+    return sendValidationError(
+      res,
+      "Prompt is required and must be a non-empty string",
+      {
+        provided: typeof prompt,
+        required: "non-empty string",
+        received: prompt,
+      }
+    );
+  }
+
+  crud.updatePrompt(id, prompt, (err, result) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate prompt not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to update prompt";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!result || result.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Prompt not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        id,
+        prompt,
+        updated_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.delete("/api/prompts/:id", (req, res, next) => {
-  crud.deletePrompt(req.params.id, (err, result) => {
-    if (err) return next(err);
-    res.json(result);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid prompt ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Prompt ID must be a positive integer",
+    });
+  }
+
+  crud.deletePrompt(id, (err, result) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 409;
+        err.message = "Cannot delete prompt: It is referenced by other records";
+      } else {
+        err.status = 500;
+        err.message = "Failed to delete prompt";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!result || result.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Prompt not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        message: "Prompt deleted successfully",
+        id,
+        deleted_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 // --- AI_RESULTS CRUD API ---
 app.post("/api/ai_results", (req, res, next) => {
   const { prompt_id, result } = req.body;
-  if (!prompt_id || !result)
-    return res.status(400).json({ error: "prompt_id and result are required" });
+
+  // Validate prompt_id
+  if (!Number.isInteger(prompt_id) || prompt_id < 1) {
+    return sendValidationError(res, "prompt_id must be a positive integer", {
+      provided: typeof prompt_id === "number" ? prompt_id : typeof prompt_id,
+      required: "positive integer",
+      details: "prompt_id must be a valid prompt reference",
+    });
+  }
+
+  // Validate result object
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return sendValidationError(res, "result must be a valid object", {
+      provided: Array.isArray(result) ? "array" : typeof result,
+      required: "object",
+      details: "result must contain the AI generation output",
+    });
+  }
+
+  // Validate required result properties
+  const requiredProps = ["content", "metadata"];
+  const missingProps = requiredProps.filter((prop) => !(prop in result));
+  if (missingProps.length > 0) {
+    return sendValidationError(res, "Missing required properties in result", {
+      missing: missingProps,
+      required: requiredProps,
+      provided: Object.keys(result),
+    });
+  }
+
   crud.createAIResult(prompt_id, result, (err, resultObj) => {
-    if (err) return next(err);
-    res.status(201).json(resultObj);
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 404;
+        err.message = "Referenced prompt not found";
+      } else if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate AI result not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to create AI result";
+      }
+      return next(err);
+    }
+
+    // Return standardized success response
+    res.status(201).json({
+      success: true,
+      data: {
+        ...resultObj,
+        created_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.get("/api/ai_results", (req, res, next) => {
+  // Parse and validate pagination parameters
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const prompt_id = req.query.prompt_id ? parseInt(req.query.prompt_id) : null;
+
+  // Validate pagination parameters
+  if (page < 1 || limit < 1) {
+    return sendValidationError(res, "Invalid pagination parameters", {
+      provided: { page, limit },
+      required: "positive integers",
+      details: "Page and limit must be greater than 0",
+    });
+  }
+
+  // Validate prompt_id if provided
+  if (prompt_id !== null && (isNaN(prompt_id) || prompt_id < 1)) {
+    return sendValidationError(res, "Invalid prompt_id filter", {
+      provided: req.query.prompt_id,
+      required: "positive integer",
+      details: "prompt_id must be a positive integer",
+    });
+  }
+
+  // Calculate offset
+  const offset = (page - 1) * limit;
+
   crud.getAIResults((err, rows) => {
-    if (err) return next(err);
-    res.json(rows);
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve AI results";
+      return next(err);
+    }
+
+    // Filter by prompt_id if provided
+    let filteredRows = rows;
+    if (prompt_id) {
+      filteredRows = rows.filter((row) => row.prompt_id === prompt_id);
+    }
+
+    // Handle empty results
+    if (!filteredRows || filteredRows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      });
+    }
+
+    // Calculate pagination
+    const total = filteredRows.length;
+    const pages = Math.ceil(total / limit);
+    const paginatedRows = filteredRows.slice(offset, offset + limit);
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: paginatedRows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages,
+        prompt_id: prompt_id || undefined,
+      },
+    });
   });
 });
 
 app.get("/api/ai_results/:id", (req, res, next) => {
-  crud.getAIResultById(req.params.id, (err, row) => {
-    if (err) return next(err);
-    if (!row) return res.status(404).json({ error: "Not found" });
-    res.json(row);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid AI result ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "AI result ID must be a positive integer",
+    });
+  }
+
+  crud.getAIResultById(id, (err, row) => {
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve AI result";
+      return next(err);
+    }
+
+    // Handle not found
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "AI result not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        ...row,
+        result:
+          typeof row.result === "string" ? JSON.parse(row.result) : row.result,
+      },
+    });
   });
 });
 
 app.put("/api/ai_results/:id", (req, res, next) => {
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid AI result ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "AI result ID must be a positive integer",
+    });
+  }
+
+  // Validate result object
   const { result } = req.body;
-  if (!result) return res.status(400).json({ error: "result is required" });
-  crud.updateAIResult(req.params.id, result, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    return sendValidationError(res, "result must be a valid object", {
+      provided: Array.isArray(result) ? "array" : typeof result,
+      required: "object",
+      details: "result must contain the AI generation output",
+    });
+  }
+
+  // Validate required result properties
+  const requiredProps = ["content", "metadata"];
+  const missingProps = requiredProps.filter((prop) => !(prop in result));
+  if (missingProps.length > 0) {
+    return sendValidationError(res, "Missing required properties in result", {
+      missing: missingProps,
+      required: requiredProps,
+      provided: Object.keys(result),
+    });
+  }
+
+  crud.updateAIResult(id, result, (err, resultObj) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Constraint violation in update";
+      } else if (!resultObj || resultObj.changes === 0) {
+        return res.status(404).json({
+          success: false,
+          error: {
+            message: "AI result not found",
+            code: "RESOURCE_NOT_FOUND",
+            status: 404,
+            details: { id },
+          },
+        });
+      } else {
+        err.status = 500;
+        err.message = "Failed to update AI result";
+      }
+      return next(err);
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        id,
+        result,
+        updated_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.delete("/api/ai_results/:id", (req, res, next) => {
-  crud.deleteAIResult(req.params.id, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid AI result ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "AI result ID must be a positive integer",
+    });
+  }
+
+  crud.deleteAIResult(id, (err, resultObj) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 409;
+        err.message =
+          "Cannot delete AI result: It is referenced by other records";
+      } else {
+        err.status = 500;
+        err.message = "Failed to delete AI result";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!resultObj || resultObj.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "AI result not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        message: "AI result deleted successfully",
+        id,
+        deleted_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 // --- OVERRIDES CRUD API ---
 app.post("/api/overrides", (req, res, next) => {
   const { ai_result_id, override } = req.body;
-  if (!ai_result_id || !override)
-    return res
-      .status(400)
-      .json({ error: "ai_result_id and override are required" });
+
+  // Validate ai_result_id
+  if (!Number.isInteger(ai_result_id) || ai_result_id < 1) {
+    return sendValidationError(res, "ai_result_id must be a positive integer", {
+      provided:
+        typeof ai_result_id === "number" ? ai_result_id : typeof ai_result_id,
+      required: "positive integer",
+      details: "ai_result_id must be a valid AI result reference",
+    });
+  }
+
+  // Validate override object
+  if (!override || typeof override !== "object" || Array.isArray(override)) {
+    return sendValidationError(res, "override must be a valid object", {
+      provided: Array.isArray(override) ? "array" : typeof override,
+      required: "object",
+      details: "override must contain the modifications to the AI result",
+    });
+  }
+
+  // Validate override properties
+  const allowedProps = ["content", "metadata", "changes"];
+  const invalidProps = Object.keys(override).filter(
+    (prop) => !allowedProps.includes(prop)
+  );
+  if (invalidProps.length > 0) {
+    return sendValidationError(res, "Invalid properties in override object", {
+      invalid: invalidProps,
+      allowed: allowedProps,
+      provided: Object.keys(override),
+    });
+  }
+
+  // Ensure at least one valid modification
+  if (Object.keys(override).length === 0) {
+    return sendValidationError(
+      res,
+      "Override must contain at least one modification",
+      {
+        provided: "empty object",
+        required: "at least one of: content, metadata, changes",
+        details: "Override cannot be empty",
+      }
+    );
+  }
+
   crud.createOverride(ai_result_id, override, (err, resultObj) => {
-    if (err) return next(err);
-    res.status(201).json(resultObj);
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 404;
+        err.message = "Referenced AI result not found";
+      } else if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate override not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to create override";
+      }
+      return next(err);
+    }
+
+    // Return standardized success response
+    res.status(201).json({
+      success: true,
+      data: {
+        ...resultObj,
+        created_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.get("/api/overrides", (req, res, next) => {
+  console.log("DEBUG: Entering GET /api/overrides");
+  console.log("DEBUG: Query params:", req.query);
+
+  // Parse and validate pagination parameters
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const ai_result_id = req.query.ai_result_id
+    ? parseInt(req.query.ai_result_id)
+    : null;
+
+  console.log("DEBUG: Parsed params:", { page, limit, ai_result_id });
+
+  // Validate pagination parameters
+  if (page < 1 || limit < 1) {
+    return sendValidationError(res, "Invalid pagination parameters", {
+      provided: { page, limit },
+      required: "positive integers",
+      details: "Page and limit must be greater than 0",
+    });
+  }
+
+  // Validate ai_result_id if provided
+  if (ai_result_id !== null && (isNaN(ai_result_id) || ai_result_id < 1)) {
+    return sendValidationError(res, "Invalid ai_result_id filter", {
+      provided: req.query.ai_result_id,
+      required: "positive integer",
+      details: "ai_result_id must be a positive integer",
+    });
+  }
+
+  // Calculate offset
+  const offset = (page - 1) * limit;
+
+  console.log("DEBUG: About to call crud.getOverrides");
   crud.getOverrides((err, rows) => {
-    if (err) return next(err);
-    res.json(rows);
+    console.log("DEBUG: getOverrides callback received:", {
+      err,
+      rowCount: rows?.length,
+    });
+    if (err) {
+      console.error("DEBUG: Error in getOverrides:", err);
+      err.status = 500;
+      err.message = "Failed to retrieve overrides";
+      return next(err);
+    }
+
+    // Filter by ai_result_id if provided
+    let filteredRows = rows;
+    if (ai_result_id) {
+      filteredRows = rows.filter((row) => row.ai_result_id === ai_result_id);
+    }
+
+    // Handle empty results
+    if (!filteredRows || filteredRows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      });
+    }
+
+    // Calculate pagination
+    const total = filteredRows.length;
+    const pages = Math.ceil(total / limit);
+    const paginatedRows = filteredRows.slice(offset, offset + limit);
+
+    // Parse override JSON if stored as string
+    const processedRows = paginatedRows.map((row) => ({
+      ...row,
+      override:
+        typeof row.override === "string"
+          ? JSON.parse(row.override)
+          : row.override,
+    }));
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: processedRows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages,
+        ai_result_id: ai_result_id || undefined,
+      },
+    });
   });
 });
 
 app.get("/api/overrides/:id", (req, res, next) => {
-  crud.getOverrideById(req.params.id, (err, row) => {
-    if (err) return next(err);
-    if (!row) return res.status(404).json({ error: "Not found" });
-    res.json(row);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid override ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Override ID must be a positive integer",
+    });
+  }
+
+  crud.getOverrideById(id, (err, row) => {
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve override";
+      return next(err);
+    }
+
+    // Handle not found
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Override not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Parse override JSON if stored as string
+    const processedRow = {
+      ...row,
+      override:
+        typeof row.override === "string"
+          ? JSON.parse(row.override)
+          : row.override,
+    };
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: processedRow,
+    });
   });
 });
 
 app.put("/api/overrides/:id", (req, res, next) => {
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid override ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Override ID must be a positive integer",
+    });
+  }
+
+  // Validate override object
   const { override } = req.body;
-  if (!override) return res.status(400).json({ error: "override is required" });
-  crud.updateOverride(req.params.id, override, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  if (!override || typeof override !== "object" || Array.isArray(override)) {
+    return sendValidationError(res, "override must be a valid object", {
+      provided: Array.isArray(override) ? "array" : typeof override,
+      required: "object",
+      details: "override must contain the modifications to the AI result",
+    });
+  }
+
+  // Validate override properties
+  const allowedProps = ["content", "metadata", "changes"];
+  const invalidProps = Object.keys(override).filter(
+    (prop) => !allowedProps.includes(prop)
+  );
+  if (invalidProps.length > 0) {
+    return sendValidationError(res, "Invalid properties in override object", {
+      invalid: invalidProps,
+      allowed: allowedProps,
+      provided: Object.keys(override),
+    });
+  }
+
+  // Ensure at least one valid modification
+  if (Object.keys(override).length === 0) {
+    return sendValidationError(
+      res,
+      "Override must contain at least one modification",
+      {
+        provided: "empty object",
+        required: "at least one of: content, metadata, changes",
+        details: "Override cannot be empty",
+      }
+    );
+  }
+
+  crud.updateOverride(id, override, (err, resultObj) => {
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to update override";
+      return next(err);
+    }
+
+    if (!resultObj || resultObj.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Override not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        id,
+        override,
+        updated_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.delete("/api/overrides/:id", (req, res, next) => {
-  crud.deleteOverride(req.params.id, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid override ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "Override ID must be a positive integer",
+    });
+  }
+
+  crud.deleteOverride(id, (err, resultObj) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 409;
+        err.message =
+          "Cannot delete override: It is referenced by other records";
+      } else {
+        err.status = 500;
+        err.message = "Failed to delete override";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!resultObj || resultObj.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "Override not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        message: "Override deleted successfully",
+        id,
+        deleted_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 // --- PDF_EXPORTS CRUD API ---
 app.post("/api/pdf_exports", (req, res, next) => {
   const { ai_result_id, file_path } = req.body;
-  if (!ai_result_id || !file_path)
-    return res
-      .status(400)
-      .json({ error: "ai_result_id and file_path are required" });
+
+  // Validate ai_result_id
+  if (!Number.isInteger(ai_result_id) || ai_result_id < 1) {
+    return sendValidationError(res, "ai_result_id must be a positive integer", {
+      provided:
+        typeof ai_result_id === "number" ? ai_result_id : typeof ai_result_id,
+      required: "positive integer",
+      details: "ai_result_id must be a valid AI result reference",
+    });
+  }
+
+  // Validate file_path
+  if (typeof file_path !== "string" || !file_path.trim()) {
+    return sendValidationError(res, "file_path must be a non-empty string", {
+      provided: typeof file_path,
+      required: "non-empty string",
+      details: "file_path must be a valid path string",
+    });
+  }
+
+  // Validate file path format
+  const validPathPattern = /^[a-zA-Z0-9\-_\/\.]+\.(pdf|PDF)$/;
+  if (!validPathPattern.test(file_path)) {
+    return sendValidationError(res, "Invalid file path format", {
+      provided: file_path,
+      required: "valid PDF file path",
+      details: "File path must be a valid path ending with .pdf",
+    });
+  }
+
   crud.createPDFExport(ai_result_id, file_path, (err, resultObj) => {
-    if (err) return next(err);
-    res.status(201).json(resultObj);
+    if (err) {
+      // Handle foreign key constraint violation
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 404;
+        err.message = "Referenced AI result not found";
+      } else if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate PDF export not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to create PDF export";
+      }
+      return next(err);
+    }
+
+    // Return standardized success response
+    res.status(201).json({
+      success: true,
+      data: {
+        ...resultObj,
+        created_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.get("/api/pdf_exports", (req, res, next) => {
+  // Parse and validate pagination parameters
+  const page = parseInt(req.query.page) || 1;
+  const limit = parseInt(req.query.limit) || 10;
+  const ai_result_id = req.query.ai_result_id
+    ? parseInt(req.query.ai_result_id)
+    : null;
+
+  // Validate pagination parameters
+  if (page < 1 || limit < 1) {
+    return sendValidationError(res, "Invalid pagination parameters", {
+      provided: { page, limit },
+      required: "positive integers",
+      details: "Page and limit must be greater than 0",
+    });
+  }
+
+  // Validate ai_result_id if provided
+  if (ai_result_id !== null && (isNaN(ai_result_id) || ai_result_id < 1)) {
+    return sendValidationError(res, "Invalid ai_result_id filter", {
+      provided: req.query.ai_result_id,
+      required: "positive integer",
+      details: "ai_result_id must be a positive integer",
+    });
+  }
+
+  // Calculate offset
+  const offset = (page - 1) * limit;
+
   crud.getPDFExports((err, rows) => {
-    if (err) return next(err);
-    res.json(rows);
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve PDF exports";
+      return next(err);
+    }
+
+    // Filter by ai_result_id if provided
+    let filteredRows = rows;
+    if (ai_result_id) {
+      filteredRows = rows.filter((row) => row.ai_result_id === ai_result_id);
+    }
+
+    // Handle empty results
+    if (!filteredRows || filteredRows.length === 0) {
+      return res.status(200).json({
+        success: true,
+        data: [],
+        pagination: {
+          page,
+          limit,
+          total: 0,
+          pages: 0,
+        },
+      });
+    }
+
+    // Calculate pagination
+    const total = filteredRows.length;
+    const pages = Math.ceil(total / limit);
+    const paginatedRows = filteredRows.slice(offset, offset + limit);
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: paginatedRows,
+      pagination: {
+        page,
+        limit,
+        total,
+        pages,
+        ai_result_id: ai_result_id || undefined,
+      },
+    });
   });
 });
 
 app.get("/api/pdf_exports/:id", (req, res, next) => {
-  crud.getPDFExportById(req.params.id, (err, row) => {
-    if (err) return next(err);
-    if (!row) return res.status(404).json({ error: "Not found" });
-    res.json(row);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid PDF export ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "PDF export ID must be a positive integer",
+    });
+  }
+
+  crud.getPDFExportById(id, (err, row) => {
+    if (err) {
+      err.status = 500;
+      err.message = "Failed to retrieve PDF export";
+      return next(err);
+    }
+
+    // Handle not found
+    if (!row) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "PDF export not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: row,
+    });
   });
 });
 
 app.put("/api/pdf_exports/:id", (req, res, next) => {
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid PDF export ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "PDF export ID must be a positive integer",
+    });
+  }
+
+  // Validate file_path in request body
   const { file_path } = req.body;
-  if (!file_path)
-    return res.status(400).json({ error: "file_path is required" });
-  crud.updatePDFExport(req.params.id, file_path, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  if (typeof file_path !== "string" || !file_path.trim()) {
+    return sendValidationError(res, "file_path must be a non-empty string", {
+      provided: typeof file_path,
+      required: "non-empty string",
+      details: "file_path must be a valid path string",
+    });
+  }
+
+  // Validate file path format
+  const validPathPattern = /^[a-zA-Z0-9\-_\/\.]+\.(pdf|PDF)$/;
+  if (!validPathPattern.test(file_path)) {
+    return sendValidationError(res, "Invalid file path format", {
+      provided: file_path,
+      required: "valid PDF file path",
+      details: "File path must be a valid path ending with .pdf",
+    });
+  }
+
+  crud.updatePDFExport(id, file_path, (err, resultObj) => {
+    if (err) {
+      // Handle database errors
+      if (err.code === "SQLITE_CONSTRAINT") {
+        err.status = 409;
+        err.message = "Duplicate file path not allowed";
+      } else {
+        err.status = 500;
+        err.message = "Failed to update PDF export";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!resultObj || resultObj.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "PDF export not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        id,
+        file_path,
+        updated_at: new Date().toISOString(),
+      },
+    });
   });
 });
 
 app.delete("/api/pdf_exports/:id", (req, res, next) => {
-  crud.deletePDFExport(req.params.id, (err, resultObj) => {
-    if (err) return next(err);
-    res.json(resultObj);
+  // Validate ID parameter
+  const id = parseInt(req.params.id);
+  if (isNaN(id) || id < 1) {
+    return sendValidationError(res, "Invalid PDF export ID", {
+      provided: req.params.id,
+      required: "positive integer",
+      details: "PDF export ID must be a positive integer",
+    });
+  }
+
+  crud.deletePDFExport(id, (err, resultObj) => {
+    if (err) {
+      // Handle specific database errors
+      if (err.code === "SQLITE_FOREIGN_KEY") {
+        err.status = 409;
+        err.message =
+          "Cannot delete PDF export: It is referenced by other records";
+      } else {
+        err.status = 500;
+        err.message = "Failed to delete PDF export";
+      }
+      return next(err);
+    }
+
+    // Handle not found case
+    if (!resultObj || resultObj.changes === 0) {
+      return res.status(404).json({
+        success: false,
+        error: {
+          message: "PDF export not found",
+          code: "RESOURCE_NOT_FOUND",
+          status: 404,
+          details: { id },
+        },
+      });
+    }
+
+    // Return standardized success response
+    res.status(200).json({
+      success: true,
+      data: {
+        message: "PDF export deleted successfully",
+        id,
+        deleted_at: new Date().toISOString(),
+      },
+    });
   });
 });
 

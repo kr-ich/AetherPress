@@ -1,18 +1,24 @@
 <script>
+  import { submitPrompt as submitPromptApi } from '../lib/api';
+  import ContentPreview from './ContentPreview.svelte';
+
   let prompt = '';
-  let aiResult = '';
   let loading = false;
   let error = '';
-
-  import { submitPrompt as submitPromptApi } from '../lib/api';
+  let generatedContent = null;
 
   async function submitPrompt() {
-    aiResult = '';
     error = '';
     loading = true;
+    generatedContent = null;
+    
     try {
       const data = await submitPromptApi(prompt);
-      aiResult = data.result || JSON.stringify(data);
+      generatedContent = data.content || {
+        title: 'Generated Content',
+        body: data.result || JSON.stringify(data),
+        layout: 'default'
+      };
     } catch (err) {
       error = err.message;
     } finally {
@@ -37,11 +43,8 @@
   {#if error}
     <div class="error">{error}</div>
   {/if}
-  {#if aiResult}
-    <div class="result">
-      <strong>AI Result:</strong>
-      <pre>{aiResult}</pre>
-    </div>
+  {#if generatedContent}
+    <ContentPreview content={generatedContent} />
   {/if}
 </div>
 
@@ -87,16 +90,5 @@
     padding: 0.5rem;
     font-size: 0.95rem;
   }
-  .result {
-    background: #f6f8fa;
-    border-radius: 6px;
-    padding: 0.7rem;
-    font-size: 0.98rem;
-    overflow-x: auto;
-  }
-  pre {
-    margin: 0.5rem 0 0 0;
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
+  /* Component styles end */
 </style>

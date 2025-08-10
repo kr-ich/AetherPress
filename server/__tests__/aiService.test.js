@@ -44,52 +44,67 @@ describe("API: /prompt (AI Processing Layer)", () => {
       .send({ prompt: testPrompt });
 
     expect(res.status).toBe(201);
-    expect(res.body).toHaveProperty("content");
-    expect(res.body).toHaveProperty("metadata");
-    expect(res.body).toHaveProperty("promptId");
-    expect(res.body).toHaveProperty("resultId");
+    expect(res.body).toHaveProperty("success", true);
+    expect(res.body).toHaveProperty("data");
+
+    const { data } = res.body;
+    expect(data).toHaveProperty("content");
+    expect(data).toHaveProperty("metadata");
+    expect(data).toHaveProperty("promptId");
+    expect(data).toHaveProperty("resultId");
 
     // Content validation
-    expect(res.body.content).toHaveProperty("title");
-    expect(res.body.content).toHaveProperty("body");
-    expect(res.body.content).toHaveProperty("layout");
-    expect(typeof res.body.content.body).toBe("string");
-    expect(res.body.content.body.length).toBeGreaterThan(0);
+    expect(data.content).toHaveProperty("title");
+    expect(data.content).toHaveProperty("body");
+    expect(data.content).toHaveProperty("layout");
+    expect(typeof data.content.body).toBe("string");
+    expect(data.content.body.length).toBeGreaterThan(0);
 
     // Metadata validation
-    expect(res.body.metadata).toHaveProperty("model", "mock-1");
-    expect(res.body.metadata).toHaveProperty("tokens");
+    expect(data.metadata).toHaveProperty("model", "mock-1");
+    expect(data.metadata).toHaveProperty("tokens");
 
     // Store IDs for cleanup
-    createdPromptIds.push(res.body.promptId);
-    createdResultIds.push(res.body.resultId);
+    createdPromptIds.push(res.body.data.promptId);
+    createdResultIds.push(res.body.data.resultId);
 
     // Verify prompt storage
     const storedPrompt = await request(baseUrl).get(
-      `/api/prompts/${res.body.promptId}`
+      `/api/prompts/${res.body.data.promptId}`
     );
     expect(storedPrompt.status).toBe(200);
     expect(storedPrompt.body).toHaveProperty("prompt", testPrompt);
 
     // Verify AI result storage
     const storedResult = await request(baseUrl).get(
-      `/api/ai_results/${res.body.resultId}`
+      `/api/ai_results/${res.body.data.resultId}`
     );
     expect(storedResult.status).toBe(200);
     expect(storedResult.body).toHaveProperty("result");
-    expect(storedResult.body.result).toEqual(res.body.content);
+    expect(storedResult.body.result).toEqual(res.body.data.content);
   });
 
   it("should return 400 for missing or empty prompt", async () => {
     const res = await request(baseUrl).post("/prompt").send({ prompt: "   " });
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty("error");
+    expect(res.body.error).toHaveProperty("code", "VALIDATION_ERROR");
+    expect(res.body.error).toHaveProperty("message");
+    expect(res.body.error).toHaveProperty("status", 400);
+    expect(res.body.error).toHaveProperty("timestamp");
+    expect(res.body.error).toHaveProperty("requestId");
+    expect(res.body.error).toHaveProperty("details");
   });
 
   it("should return 400 for missing prompt field", async () => {
     const res = await request(baseUrl).post("/prompt").send({});
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty("error");
+    expect(res.body.error).toHaveProperty("code", "VALIDATION_ERROR");
+    expect(res.body.error).toHaveProperty("message");
+    expect(res.body.error).toHaveProperty("status", 400);
+    expect(res.body.error.details).toHaveProperty("provided");
+    expect(res.body.error.details).toHaveProperty("required");
   });
 
   it("should return 400 for invalid prompt type", async () => {
@@ -98,5 +113,12 @@ describe("API: /prompt (AI Processing Layer)", () => {
       .send({ prompt: { invalid: "object" } });
     expect(res.status).toBe(400);
     expect(res.body).toHaveProperty("error");
+    expect(res.body.error).toHaveProperty("code", "VALIDATION_ERROR");
+    expect(res.body.error).toHaveProperty("message");
+    expect(res.body.error.details).toHaveProperty("provided", "object");
+    expect(res.body.error.details).toHaveProperty(
+      "required",
+      "non-empty string"
+    );
   });
 });

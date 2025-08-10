@@ -99,9 +99,16 @@ exports.deleteAIResult = (id, cb) => {
 
 // --- OVERRIDES ---
 exports.createOverride = (ai_result_id, override, cb) => {
+  let jsonOverride;
+  try {
+    jsonOverride = JSON.stringify(override);
+  } catch (e) {
+    return cb(new Error("Invalid override object for JSON serialization"));
+  }
+
   db.run(
     `INSERT INTO overrides (ai_result_id, override) VALUES (?, ?)`,
-    [ai_result_id, override],
+    [ai_result_id, jsonOverride],
     function (err) {
       cb(err, this ? { id: this.lastID } : null);
     }
@@ -109,19 +116,71 @@ exports.createOverride = (ai_result_id, override, cb) => {
 };
 
 exports.getOverrides = (cb) => {
-  db.all(`SELECT * FROM overrides ORDER BY created_at DESC`, [], cb);
+  console.log("DEBUG: crud.getOverrides called");
+  db.all(
+    `SELECT * FROM overrides ORDER BY created_at DESC`,
+    [],
+    (err, rows) => {
+      console.log("DEBUG: db.all callback received:", {
+        err,
+        rowCount: rows?.length,
+      });
+      if (err) {
+        console.error("DEBUG: Database error:", err);
+        return cb(err);
+      }
+      try {
+        console.log("DEBUG: Processing rows:", rows);
+        rows = rows.map((row) => {
+          console.log("DEBUG: Processing row:", row);
+          return {
+            ...row,
+            override:
+              typeof row.override === "string"
+                ? JSON.parse(row.override)
+                : row.override,
+          };
+        });
+        console.log("DEBUG: Successfully processed all rows");
+        cb(null, rows);
+      } catch (e) {
+        console.error("DEBUG: JSON parsing error:", e);
+        cb(new Error("Invalid JSON in database"));
+      }
+    }
+  );
 };
 
 exports.getOverrideById = (id, cb) => {
-  db.get(`SELECT * FROM overrides WHERE id = ?`, [id], cb);
+  db.get(`SELECT * FROM overrides WHERE id = ?`, [id], (err, row) => {
+    if (err || !row) return cb(err, row);
+    try {
+      row.override =
+        typeof row.override === "string"
+          ? JSON.parse(row.override)
+          : row.override;
+      cb(null, row);
+    } catch (e) {
+      cb(new Error("Invalid JSON in database"));
+    }
+  });
 };
 
 exports.updateOverride = (id, override, cb) => {
+  let jsonOverride;
+  try {
+    jsonOverride = JSON.stringify(override);
+  } catch (e) {
+    return cb(new Error("Invalid override object for JSON serialization"));
+  }
+
   db.run(
     `UPDATE overrides SET override = ? WHERE id = ?`,
-    [override, id],
+    [jsonOverride, id],
     function (err) {
-      cb(err, { changes: this.changes });
+      if (err) return cb(err);
+      if (this.changes === 0) return cb(null, { changes: 0 });
+      cb(null, { changes: this.changes });
     }
   );
 };
