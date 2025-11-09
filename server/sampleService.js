@@ -75,4 +75,13 @@ module.exports = {
   buildPagesFromCopies,
   generate,
   generateFromPrompt,
+  // New: handle accepts canonical payload { mode, prompt, metadata, options }
+  async handle(payload) {
+    const prompt =
+      typeof payload === "string" ? payload : (payload && payload.prompt) || "";
+    // The existing generateFromPrompt expects an envelope-like param; reuse it
+    const envelopeReq = { in_envelope: { prompt }, out_envelope: {} };
+    // generateFromPrompt returns { out_envelope, metadata }
+    return generate(envelopeReq);
+  },
 };

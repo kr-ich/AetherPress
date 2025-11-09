@@ -285,6 +285,76 @@ const genieService = {
     }
   },
 
+  /**
+   * Process canonical payload: { mode, prompt, metadata, options }
+   * Routes to the appropriate service based on mode.
+   * @param {{mode:string,prompt:string,metadata?:object,options?:object}} payload
+   */
+  async process(payload) {
+    if (!payload || !payload.mode || typeof payload.prompt !== "string") {
+      const e = new Error("Invalid payload: expected { mode, prompt }");
+      // @ts-ignore
+      e.status = 400;
+      throw e;
+    }
+
+    switch (payload.mode) {
+      case "demo":
+        try {
+          const demoSvc = require("./demoService");
+          if (typeof demoSvc.handle === "function")
+            return demoSvc.handle(payload);
+          // fallback: if only generateFromPrompt exists
+          if (typeof demoSvc.generateFromPrompt === "function")
+            return demoSvc.generateFromPrompt(payload.prompt);
+        } catch (e) {
+          // rethrow as 500
+          const err = new Error(
+            "Demo service unavailable: " + (e && e.message)
+          );
+          // @ts-ignore
+          err.status = 500;
+          throw err;
+        }
+        break;
+      case "ebook":
+        try {
+          const ebookSvc = require("./ebookService");
+          if (typeof ebookSvc.handle === "function")
+            return ebookSvc.handle(payload);
+          if (typeof ebookSvc.generateFromPrompt === "function")
+            return ebookSvc.generateFromPrompt(payload.prompt);
+        } catch (e) {
+          const err = new Error(
+            "eBook service unavailable: " + (e && e.message)
+          );
+          // @ts-ignore
+          err.status = 500;
+          throw err;
+        }
+        break;
+      case "basic":
+      default:
+        try {
+          const svc =
+            typeof _injectedSampleService !== "undefined"
+              ? _injectedSampleService
+              : sampleService;
+          // prefer a handle(payload) if present for canonical routing
+          if (svc && typeof svc.handle === "function")
+            return svc.handle(payload);
+          // fallback: call existing generateFromPrompt with prompt string
+          if (svc && typeof svc.generateFromPrompt === "function")
+            return svc.generateFromPrompt(payload.prompt);
+        } catch (e) {
+          const err = new Error("Sample service failed: " + (e && e.message));
+          // @ts-ignore
+          err.status = 500;
+          throw err;
+        }
+    }
+  },
+
   readLatest() {
     try {
       const { readLatest } = require("./utils/fileUtils");
